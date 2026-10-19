@@ -618,67 +618,67 @@ int main(int argc, char** argv) {
 
             std::snprintf(line, sizeof(line), "gimbal_ctl -> %s:%d   %s",
                           o.host.c_str(), o.ctrl_port,
-                          use_grab ? "[鼠标:grab]" : "[鼠标:warp]");
+                          use_grab ? "[mouse:grab]" : "[mouse:warp]");
             text(line);
 
-            if (hold_mode) text("** HOLD **（空格恢复）");
+            if (hold_mode) text("** HOLD ** (space to resume)");
 
             if (have_telem) {
                 std::snprintf(line, sizeof(line),
-                              "yaw   指令 %+7.1f   实际 %+7.1f   输出角 %+9.2f",
+                              "yaw    cmd %+7.1f  act %+7.1f  out %+9.2f deg",
                               rate[0], last_telem.yaw_dps, last_telem.yaw_deg);
                 text(line);
                 std::snprintf(line, sizeof(line),
-                              "pitch 指令 %+7.1f   实际 %+7.1f   输出角 %+9.2f",
+                              "pitch  cmd %+7.1f  act %+7.1f  out %+9.2f deg",
                               rate[1], last_telem.pitch_dps, last_telem.pitch_deg);
                 text(line);
                 std::snprintf(line, sizeof(line),
-                              "电机 %+7.1f / %+7.1f RPM   %5.2fV  %dC   status=0x%02X",
+                              "motor %+7.1f / %+7.1f RPM  %5.2fV  %dC  status=0x%02X",
                               last_telem.yaw_rpm, last_telem.pitch_rpm,
                               last_telem.vbus_mv / 1000.0, last_telem.temp_c,
                               last_telem.status);
                 text(line);
 
-                const char* st = "正常";
-                if (last_telem.status & ctrl_status::EStop)    st = "急停";
-                else if (last_telem.status & ctrl_status::Stall)    st = "堵转!";
-                else if (last_telem.status & ctrl_status::Watchdog) st = "看门狗断流!";
+                const char* st = "OK";
+                if (last_telem.status & ctrl_status::EStop)    st = "ESTOP";
+                else if (last_telem.status & ctrl_status::Stall)    st = "STALL!";
+                else if (last_telem.status & ctrl_status::Watchdog) st = "WATCHDOG!";
                 else if (!(last_telem.status & ctrl_status::YawOk) ||
-                         !(last_telem.status & ctrl_status::PitchOk)) st = "电机失联!";
+                         !(last_telem.status & ctrl_status::PitchOk)) st = "MOTOR LOST!";
 
                 std::snprintf(line, sizeof(line),
-                              "链路 %dHz 丢 %.0f  RTT %.1fms   %s   rx=%dHz",
+                              "link %dHz lost %.0f  RTT %.1fms  %s  rx=%dHz",
                               static_cast<int>(o.hz), lost_pkts, udp.rttMs(), st,
                               last_telem.rx_hz);
                 text(line);
 
                 // ---- 底盘遥测 ----
                 std::snprintf(line, sizeof(line),
-                              "底盘 位姿 %+7.0f,%+7.0f mm  yaw %+7.2f°  指令 %+5.0f,%+5.0f mm/s",
+                              "chassis pos %+7.0f,%+7.0f mm  yaw %+7.2f  cmd %+5.0f,%+5.0f mm/s",
                               last_telem.chassis_x_mm, last_telem.chassis_y_mm,
                               last_telem.chassis_yaw_deg, cvx, cvy);
                 text(line);
                 std::snprintf(line, sizeof(line),
-                              "     轮速 FL%+6.1f FR%+6.1f BL%+6.1f BR%+6.1f RPM",
+                              "        wheel FL%+6.1f FR%+6.1f BL%+6.1f BR%+6.1f RPM",
                               last_telem.chassis_wheel_rpm[0], last_telem.chassis_wheel_rpm[1],
                               last_telem.chassis_wheel_rpm[2], last_telem.chassis_wheel_rpm[3]);
                 text(line);
                 std::snprintf(line, sizeof(line),
-                              "     实际 %+5.0f,%+5.0f mm/s  陀螺yaw %+7.2f°  底盘%s  %s",
+                              "        act %+5.0f,%+5.0f mm/s  gyro_yaw %+7.2f  chassis %s  %s",
                               last_telem.chassis_vx_mmps, last_telem.chassis_vy_mmps,
                               last_telem.chassis_gyro_yaw_deg,
-                              last_telem.chassis_valid ? "在线" : "离线",
-                              chassis_estop ? "[急停]" : (chassis_en ? "" : "[未使能]"));
+                              last_telem.chassis_valid ? "ONLINE" : "OFFLINE",
+                              chassis_estop ? "[ESTOP]" : (chassis_en ? "" : "[DISABLED]"));
                 text(line);
             } else {
-                text("等待 Jetson 遥测…（确认 gimbal 已启动且 --host 正确）");
+                text("waiting for telemetry ... (check gimbal running + --host)");
             }
 
             if (video_on) {
-                std::snprintf(line, sizeof(line), "视频 %.1f fps %s",
-                              view.fps(), view.connected() ? "已连接" : "连接中…");
+                std::snprintf(line, sizeof(line), "video %.1f fps %s",
+                              view.fps(), view.connected() ? "connected" : "connecting...");
             } else {
-                std::snprintf(line, sizeof(line), "视频 关闭（v 打开）");
+                std::snprintf(line, sizeof(line), "video off (press v)");
             }
             text(line);
 
