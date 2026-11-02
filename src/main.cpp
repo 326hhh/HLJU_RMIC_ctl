@@ -1,33 +1,26 @@
 // ===========================================================================
-//  gimbal_ctl —— 云台鼠标控制客户端（PC 端，原生 X11）
+//  gimbal_ctl —— 云台/底盘控制客户端（PC 端，原生 X11）
 //
-//  职责: 抓鼠标 -> 算角速度 -> UDP 发给 Jetson -> 显示遥测 + 视频
+//  职责: 方向键/WASD -> 换算指令 -> UDP 发给 Jetson -> 显示遥测 + 视频
 //
-//  鼠标映射（角速度模式，像 FPS 视角）:
-//      鼠标移动速度(px/s) × 灵敏度(°/px) = 目标角速度(°/s)
-//      目标值经一阶低通平滑（时间常数 --tau，默认 50ms）
-//      停手 -> 目标为 0 -> 平滑衰减到 0
-//
-//  ⚠️ 关于 Wayland:
-//      在 Wayland 会话下本程序跑在 XWayland 里。XGrabPointer 的"锁定"
-//      能否穿透到合成器取决于 XWayland 版本，不保证。
-//      因此提供两种模式：
-//          --mode grab  用 XGrabPointer 把指针限制在窗口内（X11 下最干净）
-//          --mode warp  每个控制周期把指针 XWarpPointer 回窗口中心，
-//                       用位置差算增量 —— **XWayland 下这个一定可用**
-//          --mode auto  先试 grab，失败自动降级 warp（默认）
+//  云台方向键（角速度模式）:
+//      按住 ←/→ = yaw 左/右   按住 ↑/↓ = pitch 抬头/低头
+//      速率 --gimbal-rate（默认 120°/s），经一阶低通 --tau（默认 30ms）
+//      松开 -> 目标为 0 -> 平滑衰减到 0
+//      （鼠标不再参与控制，指针不再被锁定；--mode/--sens/--invert-y
+//       参数保留但已不生效，仅为兼容旧命令行）
 //
 //  用法:
-//      gimbal_ctl --host 192.168.2.2                 自动选模式 + 开视频
-//      gimbal_ctl --host nano.local --mode warp
-//      gimbal_ctl --host 192.168.2.2 --no-video       纯鼠标控制
+//      gimbal_ctl --host 192.168.2.2                 方向键控制 + 开视频
+//      gimbal_ctl --host 192.168.2.2 --no-video       只要控制，不要视频
+//      gimbal_ctl --host 192.168.2.2 --gimbal-rate 150  方向键更快
 //      gimbal_ctl --selftest                          只测 UDP 收发，不开窗口
 //
 //  按键:
-//      移动鼠标 = 转云台      Esc/q = 退出       空格 = 停手/继续
-//      W/S = 前进/后退        A/D = 左移/右移      ←/→ = 底盘左转/右转
-//      e = 云台使能开关       f = 底盘使能开关      x = 急停（云台+底盘）
-//      c = 底盘里程计清零     h = 云台回中          z = 云台当前位置归零
+//      ↑/↓ = 云台俯仰        ←/→ = 云台左右       空格 = 停手/继续
+//      W/S = 底盘前进/后退    A/D = 底盘左移/右移    Q/E = 底盘左转/右转
+//      g = 云台使能开关       f = 底盘使能开关       x = 急停（云台+底盘）
+//      c = 底盘里程计清零     h = 云台回中           z = 云台当前位置归零
 //      r = 清空当前速率       v = 视频开关
 // ===========================================================================
 #include <X11/Xlib.h>
@@ -84,6 +77,7 @@ struct Options {
     double      sens      = 0.09;          ///< °/s per (px/s)
     double      tau       = 0.03;          ///< 平滑时间常数 s（50→30ms，降感知延迟）
     double      max_rate  = 180.0;         ///< 角速度上限 °/s
+    double      gimbal_rate = 120.0;       ///< 方向键控制云台的速率 °/s
     double      deadzone  = 0.5;           ///< px/s 死区
     bool        invert_y  = false;         ///< 鼠标上下是否反向
     int         win_w     = 960;
@@ -104,11 +98,12 @@ static void usage(const char* a0) {
         "  --ctrl-port <n>      UDP 控制口 (默认 %u)\n"
         "  --http-port <n>      MJPEG 端口 (默认 8080)\n"
         "  --no-video           不显示视频\n"
-        "  --mode <模式>        auto | grab | warp (默认 auto)\n"
-        "  --sens <f>           灵敏度 °/px (默认 0.09)\n"
-        "  --tau <s>            平滑时间常数 (默认 0.05)\n"
+        "  --mode <模式>        [已废弃] auto | grab | warp（鼠标不再参与控制）\n"
+        "  --sens <f>           [已废弃] 旧鼠标灵敏度\n"
+        "  --tau <s>            平滑时间常数 (默认 0.03)\n"
         "  --max-rate <dps>     角速度上限 (默认 180)\n"
-        "  --invert-y           鼠标上下反向\n"
+        "  --gimbal-rate <dps>  方向键云台速率 (默认 120)\n"
+        "  --invert-y           [已废弃] 旧鼠标上下反向\n"
         "  --size <w> <h>       窗口尺寸 (默认 960 540)\n"
         "  --hz <n>             发送频率 (默认 100)\n"
         "  --chassis-speed <mm/s> 底盘平移满速 (默认 300)\n"
@@ -273,6 +268,7 @@ int main(int argc, char** argv) {
         else if (a == "--sens")      o.sens = next(o.sens);
         else if (a == "--tau")       o.tau = next(o.tau);
         else if (a == "--max-rate")  o.max_rate = next(o.max_rate);
+        else if (a == "--gimbal-rate") o.gimbal_rate = next(o.gimbal_rate);
         else if (a == "--invert-y")  o.invert_y = true;
         else if (a == "--chassis-speed") o.chassis_speed = next(o.chassis_speed);
         else if (a == "--chassis-turn")  o.chassis_turn = next(o.chassis_turn);
@@ -336,51 +332,7 @@ int main(int argc, char** argv) {
     XFontStruct* font = XLoadQueryFont(dpy, "fixed");
     if (font) XSetFont(dpy, gc, font->fid);
 
-    // ---- 鼠标锁定模式 ----
-    bool use_grab = (o.mode != "warp");
-    bool warping  = false;
-
-    // ⚠️ XGrabPointer 在窗口还没真正显示时会返回 GrabNotViewable(3)。
-    //    XMapWindow 只是"请求映射"，必须等 map_state == IsViewable。
-    {
-        XWindowAttributes wa;
-        for (int i = 0; i < 200; ++i) {          // 最多等 2 秒
-            XSync(dpy, False);
-            if (XGetWindowAttributes(dpy, win, &wa) && wa.map_state == IsViewable)
-                break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        }
-    }
-
-    if (use_grab) {
-        XSync(dpy, False);
-        const int rc = XGrabPointer(dpy, win, True,
-                                    PointerMotionMask | ButtonPressMask |
-                                        ButtonReleaseMask,
-                                    GrabModeAsync, GrabModeAsync, win, None,
-                                    CurrentTime);
-        if (rc != GrabSuccess) {
-            std::printf("[mouse] XGrabPointer 失败 (rc=%d)", rc);
-            if (o.mode == "grab") {
-                std::printf("；改用 --mode warp\n");
-                use_grab = false;
-            } else {
-                std::printf("；自动降级为 warp 模式\n");
-                use_grab = false;
-            }
-        } else {
-            std::printf("[mouse] XGrabPointer 成功\n");
-        }
-    }
-    if (!use_grab) {
-        warping = true;
-        std::printf("[mouse] 使用 warp 模式：每拍把指针拉回窗口中心\n");
-    }
-
-    // 把指针放进窗口中央作为基准
-    int cx = o.win_w / 2, cy = o.win_h / 2;
-    XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, cy);
-    XSync(dpy, False);
+    // ---- 云台改为方向键控制：不再锁定鼠标指针 ----
 
     // ---- 视频 ----
     MjpegView  view;
@@ -405,19 +357,18 @@ int main(int argc, char** argv) {
     bool     chassis_estop     = false;
     bool     oneshot_chassis_clear = false;
     double   cvx = 0.0, cvy = 0.0, cwz = 0.0;   // 平滑后的 mm/s 与 mrad/s
-    int     last_x = cx, last_y = cy;
     double  lost_pkts = 0;
     uint32_t last_echo = 0;
 
     std::printf("========================================================\n");
-    std::printf("  gimbal_ctl 云台鼠标控制\n");
+    std::printf("  gimbal_ctl 云台/底盘控制\n");
     std::printf("  目标    : %s  UDP:%d  MJPEG:%d\n", o.host.c_str(), o.ctrl_port,
                 o.http_port);
-    std::printf("  灵敏度  : %.3f °/px   平滑 tau=%.0fms   上限 %.0f°/s\n",
-                o.sens, o.tau * 1000, o.max_rate);
-    std::printf("  按键    : 鼠标=转云台  空格=停手  e=云台使能  f=底盘使能  x=急停  h=回中\n");
-    std::printf("            W/S=前后  A/D=左右  ←/→=底盘转向  c=底盘清零\n");
-    std::printf("            z=归零  r=清速率  v=视频开关  Esc/q=退出\n");
+    std::printf("  云台    : 方向键速率 %.0f°/s   平滑 tau=%.0fms   上限 %.0f°/s\n",
+                o.gimbal_rate, o.tau * 1000, o.max_rate);
+    std::printf("  按键    : ↑/↓=云台俯仰  ←/→=云台左右  空格=停手  g=云台使能  f=底盘使能\n");
+    std::printf("            W/S=前后  A/D=左右  Q/E=底盘转向  x=急停  h=回中\n");
+    std::printf("            z=归零  r=清速率  v=视频开关  Esc=退出\n");
     std::printf("  底盘    : 平移 %.0f mm/s  转向 %.0f mrad/s（vx 前进 / vy 左移 / wz 逆时针）\n",
                 o.chassis_speed, o.chassis_turn);
     std::printf("========================================================\n");
@@ -436,15 +387,11 @@ int main(int argc, char** argv) {
             XEvent ev;
             XNextEvent(dpy, &ev);
             switch (ev.type) {
-                case MotionNotify:
-                    last_x = ev.xmotion.x;
-                    last_y = ev.xmotion.y;
-                    break;
                 case KeyPress: {
                     const KeySym ks = XLookupKeysym(&ev.xkey, 0);
-                    if (ks == XK_Escape || ks == XK_q) running = false;
+                    if (ks == XK_Escape) running = false;
                     else if (ks == XK_space) hold_mode = !hold_mode;
-                    else if (ks == XK_e) { en_state = !en_state;
+                    else if (ks == XK_g) { en_state = !en_state;
                                            oneshot |= ctrl_flag::Enable; }
                     else if (ks == XK_f) { chassis_en = !chassis_en;
                                            if (chassis_en) chassis_estop = false;
@@ -472,40 +419,15 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---------- 2. 算鼠标增量 ----------
-        int dx = 0, dy = 0;
-        if (warping) {
-            // 位置差 -> 立刻拉回中心
-            Window  root_ret, child_ret;
-            int     rx, ry, wx, wy;
-            unsigned mask;
-            if (XQueryPointer(dpy, win, &root_ret, &child_ret, &rx, &ry, &wx, &wy, &mask)) {
-                dx = wx - cx;
-                dy = wy - cy;
-                if (dx != 0 || dy != 0)
-                    XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, cy);
-            }
-        } else {
-            dx = last_x - cx;
-            dy = last_y - cy;
-            if (dx != 0 || dy != 0)
-                XWarpPointer(dpy, None, win, 0, 0, 0, 0, cx, cy);
+        // ---------- 2. 云台：方向键速率控制（↑/↓=pitch 抬头/低头，←/→=yaw 左/右）----------
+        double target_yaw   = 0.0;
+        double target_pitch = 0.0;
+        if (!hold_mode) {
+            if (keyDown(dpy, XK_Left))  target_yaw   += o.gimbal_rate;
+            if (keyDown(dpy, XK_Right)) target_yaw   -= o.gimbal_rate;
+            if (keyDown(dpy, XK_Up))    target_pitch += o.gimbal_rate;
+            if (keyDown(dpy, XK_Down))  target_pitch -= o.gimbal_rate;
         }
-        XSync(dpy, False);
-        last_x = cx;
-        last_y = cy;
-
-        // ---------- 3. 角速度：位移速度 × 灵敏度，再一阶低通 ----------
-        const double px_per_s_x = dx / dt_target;
-        const double px_per_s_y = dy / dt_target;
-
-        auto shape = [&](double pps) {
-            if (std::fabs(pps) < o.deadzone) return 0.0;
-            return pps * o.sens;
-        };
-
-        double target_yaw   = hold_mode ? 0.0 : shape(px_per_s_x);
-        double target_pitch = hold_mode ? 0.0 : shape(-px_per_s_y * (o.invert_y ? -1.0 : 1.0));
 
         target_yaw   = std::max(-o.max_rate, std::min(o.max_rate, target_yaw));
         target_pitch = std::max(-o.max_rate, std::min(o.max_rate, target_pitch));
@@ -521,8 +443,8 @@ int main(int argc, char** argv) {
             if (keyDown(dpy, XK_s))      tvx -= o.chassis_speed;
             if (keyDown(dpy, XK_a))      tvy += o.chassis_speed;   // +y = 左移
             if (keyDown(dpy, XK_d))      tvy -= o.chassis_speed;
-            if (keyDown(dpy, XK_Left))   twz += o.chassis_turn;    // +wz = 逆时针
-            if (keyDown(dpy, XK_Right))  twz -= o.chassis_turn;
+            if (keyDown(dpy, XK_q))      twz += o.chassis_turn;    // Q = 左转（+wz 逆时针）
+            if (keyDown(dpy, XK_e))      twz -= o.chassis_turn;    // E = 右转
         }
         {
             // 平移 3000 mm/s²、转向 6 rad/s²：满速约 0.1~0.25 s
@@ -616,9 +538,8 @@ int main(int argc, char** argv) {
                 ty += 15;
             };
 
-            std::snprintf(line, sizeof(line), "gimbal_ctl -> %s:%d   %s",
-                          o.host.c_str(), o.ctrl_port,
-                          use_grab ? "[mouse:grab]" : "[mouse:warp]");
+            std::snprintf(line, sizeof(line), "gimbal_ctl -> %s:%d   [keys: arrows]",
+                          o.host.c_str(), o.ctrl_port);
             text(line);
 
             if (hold_mode) text("** HOLD ** (space to resume)");
@@ -709,7 +630,6 @@ int main(int argc, char** argv) {
     fin.flags = ctrl_flag::Hold | (en_state ? ctrl_flag::Enable : 0);
     for (int i = 0; i < 3; ++i) { udp.send(fin); usleep(2000); }
 
-    if (use_grab) XUngrabPointer(dpy, CurrentTime);
     view.stop();
     if (font) XFreeFont(dpy, font);
     XFreeGC(dpy, gc);

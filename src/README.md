@@ -1,27 +1,32 @@
 # src —— gimbal_ctl 源码
 
 本目录放**实现源码**（C++，`.cpp`），构建入口是根目录 `CMakeLists.txt`，
-使用说明（编译/运行/按键/模式）见根目录 [`../README.md`](../README.md)。
+使用说明（编译/运行/按键）见根目录 [`../README.md`](../README.md)。
 
 ## 目录结构
 
 ```
 src/
-├── main.cpp         # 主程序：X11 窗口/鼠标抓取 + UDP 控制链路 + 遥测解析 + 状态渲染 + 自检
+├── main.cpp         # 主程序：X11 窗口 + 方向键/WASD 控制 + UDP 链路 + 遥测解析 + 状态渲染 + 自检
 ├── mjpeg_view.cpp   # 视频实现：TCP 拉 MJPEG、按 SOI/EOI 切帧、libjpeg 解码、帧缓存
 └── README.md
 ```
 
 ## 文件说明
 
-### `main.cpp` —— 主程序（720 行）
+### `main.cpp` —— 主程序（约 640 行）
 
-程序职责：**抓鼠标 → 算角速度 → 打包 UDP 发给 Jetson → 收遥测 → 渲染**，全程单线程主循环。
+程序职责：**方向键/WASD → 换算指令 → 打包 UDP 发给 Jetson → 收遥测 → 渲染**，全程单线程主循环。
 
 - **命令行解析**：`--host`（默认 `192.168.2.2`）、`--ctrl-port`（默认 40001）、`--http-port`
-  （8080）、`--no-video`、`--mode auto|grab|warp`、`--sens`（°/px）、`--tau`（平滑 s）、
-  `--max-rate`（°/s 上限）、`--invert-y`、`--size w h`、`--hz`（发送频率）、
-  `--chassis-speed`（底盘平移满速 mm/s）、`--chassis-turn`（底盘转向满速 mrad/s）、`--selftest`。
+  （8080）、`--no-video`、`--tau`（平滑时间常数，默认 0.03 s）、`--max-rate`（°/s 上限，默认 180）、
+  `--gimbal-rate`（方向键云台速率，默认 120 °/s）、`--chassis-speed`（底盘平移满速 mm/s，默认 300）、
+  `--chassis-turn`（底盘转向满速 mrad/s，默认 1500）、`--size w h`、`--hz`（发送频率，默认 100）、
+  `--selftest`。
+  > `--mode` / `--sens` / `--invert-y` 已废弃（云台改为方向键控制，鼠标不再参与），
+  > 参数保留仅为兼容旧命令行，**不再生效**。
+- **`keyDown()`**：`XQueryKeymap` 轮询键盘状态，用于方向键/WASD/空格等**按住**行为
+  （X11 的 KeyPress 只能拿到按下事件，连按要靠轮询）。
 - **`UdpClient`**：`open()` 用 `getaddrinfo` + `connect()` 建 UDP 通道；`send()` 把
   `ControlCommand` 编码后发 UDP，同时记录 `seq` 的发送时刻用于 RTT；`recv()` 非阻塞收遥测
   （`MSG_DONTWAIT`），解码失败计入坏包数，按 `echo_seq` 算 RTT。
@@ -29,28 +34,27 @@ src/
   UDP socket 建立、发 50 包等遥测回包、坏包计数。
 - **`main()` 主流程**：
   1. **X11 初始化**：开 display、建 960×540 窗口、检查 TrueColor 像素格式（决定能否直写视频）。
-  2. **鼠标模式**（Wayland/XWayland 兼容）：
-     - `grab`：`XGrabPointer` 把指针锁在窗口内（X11 原生会话最干净）；
-       会先等窗口真正 `IsViewable` 再抓（否则 `GrabNotViewable`）；
-     - `warp`：每拍 `XWarpPointer` 拉回窗口中心，用位置差算增量（**XWayland 下必定可用**）；
-     - `auto`（默认）：先试 grab，失败自动降级 warp。
-  3. **鼠标 → 角速度**：位置增量 / 帧周期 = 像素速度（px/s）→ 死区（`--deadzone`）→
-     ×灵敏度 → 一阶低通（`--tau`）→ 限幅 `--max-rate`；`空格` HOLD 时置 0。
-  4. **底盘 WASD**：`W/S` 前后、`A/D` 左右、`←/→` 转向；速度目标再经**加速度限幅**
+     云台改为方向键控制后**不再锁定鼠标指针**（`XGrabPointer` / `XWarpPointer` 相关代码已移除）。
+  2. **云台方向键 → 角速度**：按住 `←/→` = yaw 左/右、`↑/↓` = pitch 抬头/低头，速率
+     `--gimbal-rate`（默认 120 °/s）；目标经一阶低通（`--tau`，默认 30 ms）平滑，再限幅
+     `--max-rate`；`空格` HOLD 时目标为 0。
+  3. **底盘 WASD**：`W/S` 前后、`A/D` 左右、`Q/E` 转向；速度目标再经**加速度限幅**
      （平移 3000 mm/s²、转向 6 rad/s²）平滑，防打滑/冲击；`HOLD` 或底盘急停时目标为 0。
-  5. **组包发送**：填 `ControlCommand`（yaw/pitch 角速度、云台 flags、底盘 vx/vy/wz 与
+  4. **组包发送**：填 `ControlCommand`（yaw/pitch 角速度、云台 flags、底盘 vx/vy/wz 与
      chassis flags、一次性 `Home/Zero/EStop/Clear`），`udp.send()`；发送频率 `--hz`（默认 100 Hz）。
-  6. **收遥测**：`ControlTelemetry` 解析后更新丢包统计（`echo_seq` 跳变）、RTT、状态。
-  7. **渲染**（约 30 fps，独立于控制节拍）：视频帧居中 `XPutImage`（`img->data=nullptr`
+     Enable/Disable 二选一必带其一（显式失能，避免上电空档问题）。
+  5. **收遥测**：`ControlTelemetry` 解析后更新丢包统计（`echo_seq` 跳变）、RTT、状态。
+  6. **渲染**（约 30 fps，独立于控制节拍）：视频帧居中 `XPutImage`（`img->data=nullptr`
      防止 XDestroyImage 释放缓存），再叠状态文字：云台指令/实际/输出角、电机转速/电压/温度、
      status 异常标志（急停/堵转/看门狗/电机失联）、链路 Rx/RTT/丢包、底盘位姿/四轮转速/陀螺 yaw、
      视频 fps。
-  8. **定频**：`sleep_until` 对齐目标周期（`t_next` 累加，落后则重置）。
-  9. **收尾**：退出前连发 3 帧 `Hold` 停止指令，避免云台保持最后的速率。
-- **按键**：鼠标=转云台、空格=HOLD、`e`=云台使能/失能、`f`=底盘使能、`x`=急停（云台+底盘）、
-  `h`=云台回中、`z`=当前位置归零、`r`=清空速率、`c`=底盘里程计清零、`v`=视频开关、`Esc`/`q`=退出。
+  7. **定频**：`sleep_until` 对齐目标周期（`t_next` 累加，落后则重置）。
+  8. **收尾**：退出前连发 3 帧 `Hold` 停止指令，避免云台保持最后的速率。
+- **按键**：`←/→` 云台 yaw、`↑/↓` 云台 pitch、空格=HOLD、`g`=云台使能/失能、`f`=底盘使能、
+  `x`=急停（云台+底盘）、`c`=底盘里程计清零、`h`=云台回中、`z`=当前位置归零、`r`=清空速率、
+  `v`=视频开关、`Esc`=退出。
 - **线协议**：不在本工程里定义，**直接复用** `../gimbal/include/gimbal/link/control_link.hpp`
-  （上行 24 B / 下行 64 B，小端，显式字节偏移，两端逐字节一致）。
+  （上行 24 B / 下行 64 B，小端，显式字节偏移，两端逐字节一致；v1 的 16/32 B 旧帧仍可解码）。
 
 ### `mjpeg_view.cpp` —— MJPEG 视频实现（267 行）
 

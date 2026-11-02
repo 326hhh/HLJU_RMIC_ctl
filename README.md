@@ -1,6 +1,6 @@
-# gimbal_ctl —— 云台鼠标控制客户端（PC 端）
+# gimbal_ctl —— 云台/底盘控制客户端（PC 端）
 
-原生 X11 小程序：**抓鼠标 → 算角速度 → UDP 发给 Jetson → 显示遥测 + MJPEG 视频**。
+原生 X11 小程序：**方向键 / WASD 输入 → 换算指令 → UDP 发给 Jetson → 显示遥测 + MJPEG 视频**。
 
 ## 目录结构
 
@@ -20,7 +20,7 @@ gimbal_ctl/
 | 文件 | 作用 |
 |---|---|
 | `CMakeLists.txt` | 工程构建脚本：C++17、Release 默认；`find_package(X11)` + `pkg_check_modules(libjpeg)`；把 `include/` 与 `${GIMBAL_ROOT}/include` 加入头文件目录（`GIMBAL_ROOT` 默认 `../gimbal`，可用 `-DGIMBAL_ROOT=<路径>` 覆盖）；编译 `src/main.cpp` + `src/mjpeg_view.cpp`，链接 X11 与 libjpeg。 |
-| `README.md` | 本文件。使用说明（编译/运行/按键/鼠标模式/视频/协议）见下文；目录与文件级说明见 `include/README.md`、`src/README.md`。 |
+| `README.md` | 本文件。使用说明（编译/运行/按键/视频/协议）见下文；目录与文件级说明见 `include/README.md`、`src/README.md`。 |
 | `LICENSE` | MIT 许可证。 |
 | `.gitignore` | 忽略 `build/`、`*.o`、`*.log`、`.vscode/`、`.DS_Store`。 |
 | `include/` | 公共头文件（C++ `.hpp`）。 |
@@ -47,36 +47,39 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 # 正常使用
 ./build/gimbal_ctl --host 192.168.2.2
 
-# Wayland 下如果抓不住鼠标
-./build/gimbal_ctl --host 192.168.2.2 --mode warp
+# 方向键云台更快（默认 120°/s）
+./build/gimbal_ctl --host 192.168.2.2 --gimbal-rate 150
 
-# 只要鼠标控制，不要视频
+# 只要控制，不要视频
 ./build/gimbal_ctl --host 192.168.2.2 --no-video
 
 # 只验 UDP 链路（不开窗口）
 ./build/gimbal_ctl --selftest --host 192.168.2.2
 ```
 
-## 鼠标映射（角速度模式，像 FPS 视角）
+## 云台控制（方向键）
 
 ```
-鼠标移动速度 (px/s) × 灵敏度 (°/px)  =  目标角速度 (°/s)
-                       ↓ 一阶低通（--tau，默认 50ms）
-                    实际发给 Jetson 的值
+按住 ←/→ = yaw 左/右   ↑/↓ = pitch 抬头/低头
+       速率 --gimbal-rate（默认 120 °/s）
+              ↓ 一阶低通（--tau，默认 30ms）
+           实际发给 Jetson 的角速度
 ```
 
-- **动鼠标 → 云台转；停手 → 平滑停住**
-- `--sens 0.09`：鼠标以 1000 px/s 移动 → 云台 90°/s
-- `--tau 0.05`：平滑时间常数，调大更"黏"，调小更"贼"
-- `--invert-y`：鼠标上下反向（看你的机械装配方向）
+- **按住方向键 → 云台按固定角速度转；松开 → 平滑停住**
+- `--gimbal-rate 120`：方向键速率，调大更"能打"，调小更"稳"
+- `--max-rate 180`：角速度上限
+- `--tau 0.03`：平滑时间常数
+- 鼠标不再参与云台控制（指针不再被锁定，可以正常点窗口）
 
 ## 按键
 
 | 键 | 作用 |
 |---|---|
-| 移动鼠标 | 转云台 |
+| `←/→` | 云台 yaw 左 / 右（按住转，松开停） |
+| `↑/↓` | 云台 pitch 抬头 / 低头 |
 | **空格** | 停手 / 继续（HOLD 开关） |
-| `e` | 云台使能 / 失能切换 |
+| `g` | 云台使能 / 失能切换 |
 | `f` | 底盘使能 / 失能切换 |
 | `x` | **急停**（云台 + 底盘，立即停止 + 失能） |
 | `h` | 云台回中 |
@@ -85,33 +88,18 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 | `c` | 底盘里程计清零 |
 | `W/S` | 底盘前进 / 后退（满速 `--chassis-speed`，默认 300 mm/s） |
 | `A/D` | 底盘左移 / 右移 |
-| `←/→` | 底盘左转 / 右转（满速 `--chassis-turn`，默认 1500 mrad/s） |
+| `Q/E` | 底盘左转 / 右转（满速 `--chassis-turn`，默认 1500 mrad/s） |
 | `v` | 视频开关 |
-| `Esc` / `q` | 退出（退出前会自动发一帧停止指令） |
+| `Esc` | 退出（退出前会自动发一帧停止指令） |
 
 > 底盘坐标约定：`vx` 前进 / `vy` 左移 / `wz` 逆时针为正。
 
-## ⚠️ Wayland 下的鼠标抓取
+## 关于鼠标
 
-当前会话是 Wayland 时，本程序跑在 **XWayland** 里，`XGrabPointer` 的"锁定"
-能否穿透到合成器**取决于 XWayland 版本，不保证**。所以提供三种模式：
+云台已改为方向键控制后，**鼠标不再参与控制、指针也不再被锁定**——
+`--mode grab|warp` 参数保留但不再起作用（向后兼容旧命令行）。
 
-| 模式 | 做法 | 适用 |
-|---|---|---|
-| `grab` | `XGrabPointer` 把指针限制在窗口内 | X11 会话下最干净 |
-| **`warp`** | 每拍把指针 `XWarpPointer` 拉回窗口中心，用位置差算增量 | **XWayland 下必定可用** |
-| `auto`（默认） | 先试 grab，失败自动降级 warp | 不知道用哪个时就用它 |
-
-启动时会打印实际用了哪种：
-```
-[mouse] XGrabPointer 成功
-[mouse] XGrabPointer 失败 (rc=1)；自动降级为 warp 模式
-```
-
-**如果两种模式手感都不对**，说明当前合成器对 XWayland 支持有限，那就回到浏览器方案
-（浏览器的 Pointer Lock 由合成器原生实现，一定可用），把 Jetson 的 UDP 链路当成后端。
-
-按住 `Esc` 一定能退出（grab 模式下鼠标被锁住，只能靠键盘）。
+按 `Esc` 退出（退出前会自动发一帧停止指令）。
 
 ## 视频
 
@@ -124,7 +112,7 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 ## 状态显示
 
 ```
-gimbal_ctl -> 192.168.2.2:40001   [鼠标:grab]
+gimbal_ctl -> 192.168.2.2:40001   [keys: arrows]
 yaw   指令   +90.0   实际   +90.0   输出角   +1234.56
 pitch 指令    +0.0   实际    +0.0   输出角     -12.34
 电机  +30.0 /   +0.0 RPM   11.20V  27C   status=0x07
