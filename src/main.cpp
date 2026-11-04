@@ -19,9 +19,9 @@
 //  按键:
 //      ↑/↓ = 云台俯仰        ←/→ = 云台左右       空格 = 停手/继续
 //      W/S = 底盘前进/后退    A/D = 底盘左移/右移    Q/E = 底盘左转/右转
-//      g = 云台使能开关       f = 底盘使能开关       x = 急停（云台+底盘）
+//      g = 云台使能开关       j = 底盘使能开关       x = 急停（云台+底盘）
 //      c = 底盘里程计清零     h = 云台回中           z = 云台当前位置归零
-//      r = 清空当前速率       v = 视频开关           b = 按住连射（水弹波箱）
+//      r = 清空当前速率       v = 视频开关           F = 按住发射（水弹波箱）
 // ===========================================================================
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -351,7 +351,7 @@ int main(int argc, char** argv) {
     bool    hold_mode  = false;
     bool    en_state   = true;
     uint8_t oneshot    = 0;                 // 本拍要带的一次性 flags
-    bool    fire_hold_key = false;          // 按住 b = 连射请求（本拍）
+    bool    fire_hold_key = false;          // 按住 F = 发射请求（本拍）
 
     // ---- 底盘状态（WASD 平滑后下发）----
     bool     chassis_en        = o.chassis_en;
@@ -367,8 +367,8 @@ int main(int argc, char** argv) {
                 o.http_port);
     std::printf("  云台    : 方向键速率 %.0f°/s   平滑 tau=%.0fms   上限 %.0f°/s\n",
                 o.gimbal_rate, o.tau * 1000, o.max_rate);
-    std::printf("  按键    : ↑/↓=云台俯仰  ←/→=云台左右  空格=停手  g=云台使能  f=底盘使能\n");
-    std::printf("            W/S=前后  A/D=左右  Q/E=底盘转向  b=按住连射  x=急停  h=回中\n");
+    std::printf("  按键    : ↑/↓=云台俯仰  ←/→=云台左右  空格=停手  g=云台使能  j=底盘使能\n");
+    std::printf("            W/S=前后  A/D=左右  Q/E=底盘转向  F=按住发射  x=急停  h=回中\n");
     std::printf("            z=归零  r=清速率  v=视频开关  Esc=退出\n");
     std::printf("  底盘    : 平移 %.0f mm/s  转向 %.0f mrad/s（vx 前进 / vy 左移 / wz 逆时针）\n",
                 o.chassis_speed, o.chassis_turn);
@@ -394,7 +394,7 @@ int main(int argc, char** argv) {
                     else if (ks == XK_space) hold_mode = !hold_mode;
                     else if (ks == XK_g) { en_state = !en_state;
                                            oneshot |= ctrl_flag::Enable; }
-                    else if (ks == XK_f) { chassis_en = !chassis_en;
+                    else if (ks == XK_j) { chassis_en = !chassis_en;
                                            if (chassis_en) chassis_estop = false;
                                            std::printf("[chassis] 使能=%d\n", chassis_en ? 1 : 0); }
                     else if (ks == XK_c) oneshot_chassis_clear = true;
@@ -420,8 +420,8 @@ int main(int argc, char** argv) {
             }
         }
 
-        // ---------- 1b. 连射扳机：按住 b（空格停手时不响应）----------
-        fire_hold_key = !hold_mode && keyDown(dpy, XK_b);
+        // ---------- 1b. 发射扳机：按住 F（空格停手时不响应）----------
+        fire_hold_key = !hold_mode && keyDown(dpy, XK_f);
 
         // ---------- 2. 云台：方向键速率控制（↑/↓=pitch 抬头/低头，←/→=yaw 左/右）----------
         double target_yaw   = 0.0;
@@ -473,7 +473,7 @@ int main(int argc, char** argv) {
         if (en_state)        cc.flags |= ctrl_flag::Enable;
         else                 cc.flags |= ctrl_flag::Disable;
         if (hold_mode)       cc.flags |= ctrl_flag::Hold;
-        if (fire_hold_key)   cc.flags |= ctrl_flag::Fire;   // 按住连射
+        if (fire_hold_key)   cc.flags |= ctrl_flag::Fire;   // 按住 F 发射
 
         // ---- 底盘字段（坐标：vx 前进 / vy 左移 / wz 逆时针）----
         cc.chassis_vx_mmps   = cvx;
@@ -548,7 +548,7 @@ int main(int argc, char** argv) {
             text(line);
 
             if (hold_mode) text("** HOLD ** (space to resume)");
-            if (fire_hold_key) text("** FIRE ** (b held)");
+            if (fire_hold_key) text("** FIRE ** (F held)");
 
             if (have_telem) {
                 std::snprintf(line, sizeof(line),
