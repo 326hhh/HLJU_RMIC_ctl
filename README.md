@@ -43,19 +43,49 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 
 ## 运行
 
+两种连法，**只差 `--host`**：有线（网线直连 `192.168.2.2`）/ 无线（Jetson 热点 `10.42.0.1`）。
+
+### 有线运行（笔记本 ↔ Jetson 网线直连）
+
+笔记本 `enp8s0 192.168.2.1` ↔ Jetson `eth0 192.168.2.2`，两边都是静态地址，开机即用。
+
 ```bash
-# 正常使用
-./build/gimbal_ctl --host 192.168.2.2
-
-# 方向键云台更快（默认 120°/s）
-./build/gimbal_ctl --host 192.168.2.2 --gimbal-rate 150
-
-# 只要控制，不要视频
-./build/gimbal_ctl --host 192.168.2.2 --no-video
-
-# 只验 UDP 链路（不开窗口）
-./build/gimbal_ctl --selftest --host 192.168.2.2
+./build/gimbal_ctl --host 192.168.2.2                      # 控制 + 视频（默认）
+./build/gimbal_ctl --host 192.168.2.2 --gimbal-rate 150    # 方向键云台更快（默认 120°/s）
+./build/gimbal_ctl --host 192.168.2.2 --no-video           # 只要控制，不要视频
+./build/gimbal_ctl --selftest --host 192.168.2.2           # 只验 UDP 链路（不开窗口）
 ```
+
+### 无线运行（笔记本 ↔ Jetson 热点）
+
+**Jetson 侧**先起热点 —— `car-ap` 是 `autoconnect=no`，每次开机要手动拉：
+
+```bash
+sudo nmcli con up car-ap        # SSID MECAR-CTRL / 密码 mecar12345 / 10.42.0.1/24
+```
+
+**笔记本侧**：
+
+```bash
+sudo nmcli device wifi connect MECAR-CTRL password mecar12345
+ip -br addr show wlp14s0        # 应拿到 10.42.0.x
+
+# Meta(Clash) 会把这个网段塞进隧道，先查：
+ip route get 10.42.0.1          # 必须是 dev wlp14s0；若是 dev Meta 就加绕行规则
+sudo ip rule add to 10.42.0.0/24 lookup main priority 8000
+
+./build/gimbal_ctl --host 10.42.0.1
+./build/gimbal_ctl --host 10.42.0.1 --no-video    # 无线带宽紧张时先关视频
+```
+
+- 车要走位时用无线；**开热点时 Jetson 自己就连不了别的 WiFi**（网卡只能干一件事），有线链路不受影响；
+- **笔记本 Wi-Fi 省电必须关**，否则 ping 的 RTT 会到 333~488 ms、抖动很大（控车是 100 Hz UDP）：
+  `nmcli con mod <MECAR-CTRL 配置名> 802-11-wireless.powersave 2`
+  （这个 NetworkManager 版本 `0=default` **不会**关省电，`2` 才是 disable）；
+- 图传 640x480@30 约 2 Mbps，热点够用；1280x720@30 约 8~15 Mbps 会吃紧。
+
+> `ip rule` 是临时的，每次重连 WiFi / 重启 VPN 后都要重新加；切回校园网时删掉它：
+> `sudo ip rule del to 10.42.0.0/24 lookup main priority 8000`
 
 ## 云台控制（方向键）
 
@@ -78,9 +108,10 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 |---|---|
 | `←/→` | 云台 yaw 左 / 右（按住转，松开停） |
 | `↑/↓` | 云台 pitch 抬头 / 低头 |
-| **空格** | 停手 / 继续（HOLD 开关） |
+| **空格** | 停手 / 继续（HOLD 开关，云台 + 底盘 + 发射一起停） |
 | `g` | 云台使能 / 失能切换 |
-| `f` | 底盘使能 / 失能切换 |
+| `j` | 底盘使能 / 失能切换（**底盘急停后按 `j` 恢复**） |
+| **`F`（按住）** | **水弹发射**（按住连发，松开停；HOLD 时不响应） |
 | `x` | **急停**（云台 + 底盘，立即停止 + 失能） |
 | `h` | 云台回中 |
 | `z` | 把当前位置当作 0° |
