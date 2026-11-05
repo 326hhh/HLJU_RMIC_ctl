@@ -5,7 +5,7 @@
 //
 //  云台方向键（角速度模式）:
 //      按住 ←/→ = yaw 左/右   按住 ↑/↓ = pitch 抬头/低头
-//      速率 --gimbal-rate（默认 120°/s），经一阶低通 --tau（默认 30ms）
+//      速率 --gimbal-rate（默认 120°/s），经一阶低通 --tau（默认 45ms）
 //      松开 -> 目标为 0 -> 平滑衰减到 0
 //      （鼠标不再参与控制，指针不再被锁定；--mode/--sens/--invert-y
 //       参数保留但已不生效，仅为兼容旧命令行）
@@ -75,7 +75,7 @@ struct Options {
     bool        video     = true;
     std::string mode      = "auto";        ///< auto | grab | warp
     double      sens      = 0.09;          ///< °/s per (px/s)
-    double      tau       = 0.03;          ///< 平滑时间常数 s（50→30ms，降感知延迟）
+    double      tau       = 0.045;         ///< 平滑时间常数 s（30→45ms：起停更顺）
     double      max_rate  = 180.0;         ///< 角速度上限 °/s
     double      gimbal_rate = 120.0;       ///< 方向键控制云台的速率 °/s
     double      deadzone  = 0.5;           ///< px/s 死区
@@ -100,7 +100,7 @@ static void usage(const char* a0) {
         "  --no-video           不显示视频\n"
         "  --mode <模式>        [已废弃] auto | grab | warp（鼠标不再参与控制）\n"
         "  --sens <f>           [已废弃] 旧鼠标灵敏度\n"
-        "  --tau <s>            平滑时间常数 (默认 0.03)\n"
+        "  --tau <s>            平滑时间常数 (默认 0.045)\n"
         "  --max-rate <dps>     角速度上限 (默认 180)\n"
         "  --gimbal-rate <dps>  方向键云台速率 (默认 120)\n"
         "  --invert-y           [已废弃] 旧鼠标上下反向\n"
