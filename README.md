@@ -41,6 +41,23 @@ gimbal 工程不在 `../gimbal` 时用 `-DGIMBAL_ROOT=<路径>`。
 > 💡 想用 clangd/IDE 索引不报“找不到头文件”，配置时加上
 > `-DCMAKE_EXPORT_COMPILE_COMMANDS=ON`，生成 `build/compile_commands.json` 即可。
 
+## Windows 版（`win/`）
+
+同一套控制逻辑的 **Windows 原生客户端**（静态链接 exe，拷过去双击就能跑，无需装运行库），
+源码在 `win/`，使用说明见 [`win/readme.txt`](win/readme.txt)。
+
+```bash
+# 在 Linux 上交叉编译（默认用 zig，找不到则用 mingw-w64 g++）
+cd win && ./build_win.sh                    # 产物 win/build/gimbal_ctl.exe
+# 或指定 gimbal 工程路径
+GIMBAL_ROOT=~/gimbal ./build_win.sh
+```
+
+- 配置：`win/gimbal_ctl.ini`（host / 速度 / 平滑 / 小陀螺速率等，都有中文注释）；
+- 启动：双击 `start.cmd`（或 `gimbal_ctl.exe --selftest` 先自检）；
+- 键位与 Linux 版一致（云台方向键、WASD、Shift 快速档、R 小陀螺、F 发射）。
+- Windows 下没有 X11，窗口/键鼠用 Win32 API，视频解码用 `stb_image`。
+
 ## 运行
 
 两种连法，**只差 `--host`**：有线（网线直连 `192.168.2.2`）/ 无线（Jetson 热点 `10.42.0.1`）。

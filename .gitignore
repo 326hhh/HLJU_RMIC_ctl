@@ -4,3 +4,6 @@ build/
 .vscode/
 .DS_Store
 .cache/
+
+# Windows 版产物
+win/dist/
