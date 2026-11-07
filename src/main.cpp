@@ -21,7 +21,21 @@
 //      W/S = 底盘前进/后退    A/D = 底盘左移/右移    Q/E = 底盘左转/右转
 //      g = 云台使能开关       j = 底盘使能开关       x = 急停（云台+底盘）
 //      c = 底盘里程计清零     h = 云台回中           z = 云台当前位置归零
-//      r = 清空当前速率       v = 视频开关           F = 按住发射（水弹波箱）
+//      k = 清空当前速率       v = 视频开关           F = 按住发射（水弹波箱）
+//      R = 切换小陀螺模式（再按一下退出）
+//      按一下 Shift（左/右均可）= 切换底盘「快速/普通」模式（锁存，不用一直按）：
+//          普通档：平移 300 mm/s、转向 1.5 rad/s
+//          快速档：平移 600 mm/s、转向 3.0 rad/s
+//          再按一下 Shift 切回普通档；松开 Shift 不会退回，模式一直保持。
+//          加速度斜坡仍是 3000 mm/s²（0->600 约 0.2 s），切换不会窜。
+//          数值可用 --shift-speed / --shift-turn 改。
+//
+//  小陀螺模式（R 键切换，参考 RM 正赛）:
+//      底盘按 --spin-rate（默认 2.0 rad/s）原地自旋，yaw 电机反向补偿，
+//      让云台/相机在世界坐标系里保持不转；方向键照常控制云台（叠加在补偿上）。
+//      补偿量优先用底盘陀螺实测角速度（chassis_gyro_wz_mradps），
+//      这样地面打滑、掉速都能自动跟上；遥测断流或底盘 IMU 离线时退回指令值。
+//      --spin-rate 取负值 = 反向自旋；--spin-gain -1 = 补偿方向反了时用。
 // ===========================================================================
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
@@ -46,6 +60,7 @@
 #include <thread>
 #include <vector>
 
+#include "gimbal/link/chassis_link.hpp"   // chassis_status 状态位（判断底盘 IMU 是否在线）
 #include "gimbal/link/control_link.hpp"
 #include "mjpeg_view.hpp"
 
@@ -88,7 +103,13 @@ struct Options {
     // ---- 底盘（USART2 链路，坐标：vx 前进 / vy 左移 / wz 逆时针）----
     double      chassis_speed = 300.0;    ///< mm/s，WASD 满速
     double      chassis_turn  = 1500.0;   ///< mrad/s = 1.5 rad/s，←/→ 满速
-    bool        chassis_en    = true;     ///< f 键切换
+    double      chassis_speed_fast = 600.0;   ///< mm/s，快速档（Shift 切换）的平移满速
+    double      chassis_turn_fast  = 3000.0;  ///< mrad/s = 3.0 rad/s，快速档的转向
+    bool        chassis_en    = true;     ///< j 键切换
+
+    // ---- 小陀螺（R 键切换）：底盘原地自旋 + yaw 反向补偿让云台不转 ----
+    double      spin_rate_mradps = 2000.0;  ///< 0.001 rad/s，+ 逆时针；负值 = 顺时针
+    double      spin_gain        = 1.0;     ///< yaw 反向补偿倍率（方向反了填 -1）
 };
 
 static void usage(const char* a0) {
@@ -108,6 +129,10 @@ static void usage(const char* a0) {
         "  --hz <n>             发送频率 (默认 100)\n"
         "  --chassis-speed <mm/s> 底盘平移满速 (默认 300)\n"
         "  --chassis-turn <mrad/s> 底盘转向满速 (默认 1500)\n"
+        "  --shift-speed <mm/s> 快速档平移满速（Shift 切换，默认 600）\n"
+        "  --shift-turn <mrad/s> 快速档转向满速（Shift 切换，默认 3000）\n"
+        "  --spin-rate <mrad/s> 小陀螺自旋速率（+逆时针，默认 2000 = 2.0 rad/s）\n"
+        "  --spin-gain <f>      小陀螺 yaw 补偿倍率（默认 1.0，方向反了填 -1）\n"
         "  --selftest           只测 UDP 收发，不开窗口\n"
         "  -h, --help\n", a0, CTRL_DEFAULT_PORT);
 }
@@ -272,6 +297,10 @@ int main(int argc, char** argv) {
         else if (a == "--invert-y")  o.invert_y = true;
         else if (a == "--chassis-speed") o.chassis_speed = next(o.chassis_speed);
         else if (a == "--chassis-turn")  o.chassis_turn = next(o.chassis_turn);
+        else if (a == "--shift-speed")   o.chassis_speed_fast = next(o.chassis_speed_fast);
+        else if (a == "--shift-turn")    o.chassis_turn_fast = next(o.chassis_turn_fast);
+        else if (a == "--spin-rate")     o.spin_rate_mradps = next(o.spin_rate_mradps);
+        else if (a == "--spin-gain")     o.spin_gain = next(o.spin_gain);
         else if (a == "--size")      { o.win_w = nexti(o.win_w); o.win_h = nexti(o.win_h); }
         else if (a == "--hz")        o.hz = next(o.hz);
         else if (a == "--selftest")  o.selftest = true;
@@ -356,6 +385,12 @@ int main(int argc, char** argv) {
     // ---- 底盘状态（WASD 平滑后下发）----
     bool     chassis_en        = o.chassis_en;
     bool     chassis_estop     = false;
+    bool     chassis_fast      = false;   // 快速档开关：按一下 Shift 切换
+    bool     shift_prev        = false;   // 上一拍的 Shift 物理状态（上升沿检测用）
+    bool     spin_mode         = false;   // 小陀螺：R 键切换
+    double   spin_wz_lp        = 0.0;     // 实测自旋角速度的低通值 (mrad/s)
+    double   spin_comp_until   = 0.0;     // 关掉小陀螺后继续补偿到这一刻（吃掉减速段）
+    double   t_last_telem      = -1e9;    // 上次收到遥测的时刻（算新鲜度）
     bool     oneshot_chassis_clear = false;
     double   cvx = 0.0, cvy = 0.0, cwz = 0.0;   // 平滑后的 mm/s 与 mrad/s
     double  lost_pkts = 0;
@@ -369,9 +404,17 @@ int main(int argc, char** argv) {
                 o.gimbal_rate, o.tau * 1000, o.max_rate);
     std::printf("  按键    : ↑/↓=云台俯仰  ←/→=云台左右  空格=停手  g=云台使能  j=底盘使能\n");
     std::printf("            W/S=前后  A/D=左右  Q/E=底盘转向  F=按住发射  x=急停  h=回中\n");
-    std::printf("            z=归零  r=清速率  v=视频开关  Esc=退出\n");
-    std::printf("  底盘    : 平移 %.0f mm/s  转向 %.0f mrad/s（vx 前进 / vy 左移 / wz 逆时针）\n",
+    std::printf("            z=归零  k=清速率  v=视频开关  Esc=退出\n");
+    std::printf("            按一下 Shift = 切换快速/普通模式（锁存，不用一直按）\n");
+    std::printf("            R = 切换小陀螺（底盘自旋 + 云台反向站住）\n");
+    std::printf("  底盘    : 普通档 平移 %.0f mm/s  转向 %.0f mrad/s\n",
                 o.chassis_speed, o.chassis_turn);
+    std::printf("            快速档 平移 %.0f mm/s  转向 %.0f mrad/s\n",
+                o.chassis_speed_fast, o.chassis_turn_fast);
+    std::printf("  小陀螺  : 自旋 %+.2f rad/s（%s）  云台补偿倍率 %+.2f\n",
+                o.spin_rate_mradps / 1000.0,
+                o.spin_rate_mradps >= 0 ? "逆时针" : "顺时针", o.spin_gain);
+    std::printf("            vx 前进 / vy 左移 / wz 逆时针\n");
     std::printf("========================================================\n");
 
     const double dt_target = 1.0 / o.hz;
@@ -403,7 +446,15 @@ int main(int argc, char** argv) {
                                            std::printf("[chassis] 急停（握手 e/f 恢复）\n"); }
                     else if (ks == XK_h) oneshot |= ctrl_flag::Home;
                     else if (ks == XK_z) oneshot |= ctrl_flag::Zero;
-                    else if (ks == XK_r) { rate[0] = rate[1] = 0.0; }
+                    else if (ks == XK_k) { rate[0] = rate[1] = 0.0; }   // 清空当前速率（原 R 键）
+                    else if (ks == XK_r) {                              // R = 小陀螺切换
+                        spin_mode = !spin_mode;
+                        spin_wz_lp = 0.0;                               // 复位补偿滤波器，免得上一次残留
+                        // 关掉时底盘还要 0.33 s 才停转，这段时间继续补偿，否则相机会被甩一下
+                        if (!spin_mode) spin_comp_until = nowS() + 0.6;
+                        std::printf("[chassis] 小陀螺 %s（自旋 %+.2f rad/s，云台反向补偿）\n",
+                                    spin_mode ? "开" : "关", o.spin_rate_mradps / 1000.0);
+                    }
                     else if (ks == XK_v) {
                         video_on = !video_on;
                         if (video_on) view.start(o.host, o.http_port);
@@ -441,14 +492,33 @@ int main(int argc, char** argv) {
         rate[1] += (target_pitch - rate[1]) * a;
 
         // ---------- 3b. 底盘：键盘 -> 平滑限幅（加速度限幅防打滑/冲击）----------
+        // 按一下 Shift（左右均可）= 切换快速/普通档，锁存到再按一次为止；松开不退回。
+        // 用「上一拍 vs 这一拍」的上升沿做切换：XQueryKeymap 轮询的是物理按键状态，
+        // 长按只会保持 true，不会像 KeyPress 事件那样被 X11 自动重复刷爆。
+        const bool shift_now = keyDown(dpy, XK_Shift_L) || keyDown(dpy, XK_Shift_R);
+        if (shift_now && !shift_prev) {
+            chassis_fast = !chassis_fast;
+            std::printf("[chassis] 切到%s档：平移 %.0f mm/s / 转向 %.0f mrad/s\n",
+                        chassis_fast ? "快速" : "普通",
+                        chassis_fast ? o.chassis_speed_fast : o.chassis_speed,
+                        chassis_fast ? o.chassis_turn_fast  : o.chassis_turn);
+        }
+        shift_prev = shift_now;
+
+        const double spd  = chassis_fast ? o.chassis_speed_fast : o.chassis_speed;
+        const double turn = chassis_fast ? o.chassis_turn_fast  : o.chassis_turn;
+
         double tvx = 0.0, tvy = 0.0, twz = 0.0;
         if (!hold_mode && !chassis_estop) {
-            if (keyDown(dpy, XK_w))      tvx += o.chassis_speed;
-            if (keyDown(dpy, XK_s))      tvx -= o.chassis_speed;
-            if (keyDown(dpy, XK_a))      tvy += o.chassis_speed;   // +y = 左移
-            if (keyDown(dpy, XK_d))      tvy -= o.chassis_speed;
-            if (keyDown(dpy, XK_q))      twz += o.chassis_turn;    // Q = 左转（+wz 逆时针）
-            if (keyDown(dpy, XK_e))      twz -= o.chassis_turn;    // E = 右转
+            if (keyDown(dpy, XK_w))      tvx += spd;
+            if (keyDown(dpy, XK_s))      tvx -= spd;
+            if (keyDown(dpy, XK_a))      tvy += spd;    // +y = 左移
+            if (keyDown(dpy, XK_d))      tvy -= spd;
+            if (!spin_mode) {                           // 小陀螺时旋转交给自旋速率，Q/E 让位
+                if (keyDown(dpy, XK_q))  twz += turn;   // Q = 左转（+wz 逆时针）
+                if (keyDown(dpy, XK_e))  twz -= turn;   // E = 右转
+            }
+            if (spin_mode) twz = o.spin_rate_mradps;    // 小陀螺：恒定自旋（WASD 平移照常）
         }
         {
             // 平移 3000 mm/s²、转向 6 rad/s²：满速约 0.1~0.25 s
@@ -463,10 +533,38 @@ int main(int argc, char** argv) {
             slew(cwz, twz, max_ang);
         }
 
+        // ---------- 3c. 小陀螺：yaw 反向补偿，让云台在世界系里不转 ----------
+        // 底盘在世界系里转 +ω，yaw 电机就必须相对底盘转 −ω，相机才站得住。
+        // 补偿以**指令值 cz 为基准**，实测陀螺只用来"修正"：
+        //   实测与指令同号、且量级 ≥ 指令的 25% 时才采信（能吸掉打滑/掉速的误差）；
+        //   否则退回指令值 —— 陀螺坏掉/轴映射不对时会恒报 0，
+        //   无脑采信会让补偿直接变成 0，云台跟着车一起转（实机踩过）。
+        double spin_comp_dps = 0.0;
+        const bool comp_on = spin_mode || (nowS() < spin_comp_until);
+        if (comp_on) {
+            const bool fresh  = have_telem && (nowS() - t_last_telem < 0.3);
+            const bool imu_ok = fresh &&
+                ((last_telem.chassis_status & chassis_status::ImuOnline) != 0);
+            double wz_src = cwz;
+            if (imu_ok) {
+                const double meas = last_telem.chassis_gyro_wz_mradps;
+                if (meas * cwz > 0.0 && std::fabs(meas) >= 0.25 * std::fabs(cwz)) {
+                    wz_src = meas;          // 实测可信：用它抵消打滑
+                }
+            }
+            const double alp = std::min(1.0, dt_target / 0.03);   // 30 ms 低通压陀螺噪声
+            spin_wz_lp += (wz_src - spin_wz_lp) * alp;
+            spin_comp_dps = -o.spin_gain * spin_wz_lp * 0.001 * 57.29577951308232;  // rad/s -> °/s
+        } else {
+            spin_wz_lp = 0.0;
+        }
+
         // ---------- 4. 组包发送 ----------
         ControlCommand cc;
         cc.seq       = ++seq;
-        cc.yaw_dps   = hold_mode ? 0.0 : rate[0];
+        // 小陀螺时补偿一直生效（哪怕按了空格"停手"）：底盘自旋在减速的那 0.3 s 里
+        // 仍然在转，yaw 必须继续抵着，相机才不会跟着甩一下。
+        cc.yaw_dps   = (hold_mode ? 0.0 : rate[0]) + spin_comp_dps;
         cc.pitch_dps = hold_mode ? 0.0 : rate[1];
         cc.flags     = oneshot;
         oneshot      = 0;
@@ -494,6 +592,7 @@ int main(int argc, char** argv) {
             last_echo = t.echo_seq;
             last_telem = t;
             have_telem = true;
+            t_last_telem = nowS();      // 小陀螺补偿要判断遥测是否新鲜
         }
 
         // ---------- 6. 渲染（约 30fps，别挡控制）----------
@@ -548,7 +647,26 @@ int main(int argc, char** argv) {
             text(line);
 
             if (hold_mode) text("** HOLD ** (space to resume)");
+            if (spin_mode) {
+                std::snprintf(line, sizeof(line),
+                              "** SPIN cmd %+.2f  act %+.2f rad/s ** yaw comp %+.0f deg/s (R)",
+                              o.spin_rate_mradps / 1000.0, spin_wz_lp / 1000.0,
+                              spin_comp_dps);
+                text(line);
+            }
+            if (chassis_fast) {
+                std::snprintf(line, sizeof(line),
+                              "** FAST ** %.0f mm/s  %.1f rad/s (shift toggled)",
+                              spd, turn / 1000.0);
+                text(line);
+            }
             if (fire_hold_key) text("** FIRE ** (F held)");
+
+            // 云台被失能/急停锁死时，Jetson 会把速率强制归零（连 F6 帧都不发），
+            // 现场表现就是"yaw 完全不动"——必须在界面上喊出来，不然只能靠猜。
+            if (have_telem && !(last_telem.status & ctrl_status::Enabled)) {
+                text("** GIMBAL DISABLED/LOCKED ** 按 g 关再开(两下)重新授权");
+            }
 
             if (have_telem) {
                 std::snprintf(line, sizeof(line),
